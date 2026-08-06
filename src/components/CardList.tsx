@@ -53,7 +53,7 @@ export interface SetDetails {
 }
 
 export interface CardListProps {
-  setDetails: SetDetails;
+  setDetails?: SetDetails; // <-- Itt lett opcionálissá téve (?)
   initialCards?: Card[];
   cards?: Card[];
   onToggleCard?: (cardId: string, type: 'base' | 'reverse') => void;
@@ -201,7 +201,7 @@ export default function CardList({
               <div className="flex items-center gap-1">
                 <span className="text-slate-500 uppercase text-[10px] font-bold">ID:</span>
                 <span className="font-mono text-slate-200 bg-slate-800 px-2 py-0.5 rounded border border-slate-700 font-bold">
-                  {setDetails?.id}
+                  {setDetails?.id || 'N/A'}
                 </span>
               </div>
               {setDetails?.series && (
