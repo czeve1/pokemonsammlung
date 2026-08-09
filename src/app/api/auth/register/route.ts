@@ -37,10 +37,13 @@ export async function POST(request: Request) {
     });
 
     const cleanUser = username.trim();
+    const cleanEmail = email.trim().toLowerCase();
 
-    // Admin createUser használata az email_confirm-mel, hogy ne kelljen feltétlenül megerősíteni
+    let userId: string | undefined;
+
+    // 1. Létrehozás az Auth-ban (Admin createUser)
     const { data, error } = await supabase.auth.admin.createUser({
-      email: email.trim().toLowerCase(),
+      email: cleanEmail,
       password,
       email_confirm: true,
       user_metadata: { username: cleanUser }
@@ -49,7 +52,7 @@ export async function POST(request: Request) {
     if (error) {
       // Tartalék hagyományos signUp ha az admin kulcs nem engedné
       const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
-        email: email.trim().toLowerCase(),
+        email: cleanEmail,
         password,
         options: { data: { username: cleanUser } }
       });
@@ -60,10 +63,28 @@ export async function POST(request: Request) {
           { status: 400 }
         );
       }
-      return NextResponse.json({ success: true, user: signUpData.user });
+      userId = signUpData.user?.id;
+    } else {
+      userId = data.user?.id;
     }
 
-    return NextResponse.json({ success: true, user: data.user });
+    // 2. MENTÉS A PROFILES TÁBLÁBA IS!
+    if (userId) {
+      const { error: profileError } = await supabase
+        .from('profiles')
+        .upsert({
+          id: userId,
+          username: cleanUser,
+          email: cleanEmail,
+        });
+
+      if (profileError) {
+        console.error('Hiba a profiles táblába mentéskor:', profileError.message);
+        // Nem állítjuk meg feltétlenül, de jó ha logoljuk
+      }
+    }
+
+    return NextResponse.json({ success: true });
   } catch (err: any) {
     return NextResponse.json(
       { error: err?.message || 'Szerver hiba' },

@@ -17,11 +17,6 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
   const router = useRouter();
 
-  const formatEmail = (user: string) => {
-    const cleanUser = user.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
-    return `${cleanUser}@collector.com`;
-  };
-
   const handleAuth = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg('');
@@ -29,7 +24,7 @@ export default function LoginPage() {
 
     try {
       if (isSignUp) {
-        // Regisztráció az API híváson keresztül (küldjük a nevet, emailt, jelszót)
+        // Regisztráció az API-n keresztül (fontos, hogy a regisztrációs API mentse el az emailt a profiles-ba is!)
         const res = await fetch('/api/auth/register', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -45,16 +40,28 @@ export default function LoginPage() {
           setIsSignUp(false);
         }
       } else {
-        // Bejelentkezés: ha a megadott név tartalmaz @ jelet, akkor emailként kezeljük, különben generáljuk a régiekhez vagy a megadott formátumhoz
-        const loginEmail = username.includes('@') ? username : formatEmail(username);
-        
+        // BEJELENTKEZÉS FELHASZNÁLÓNÉV ALAPJÁN:
+        // 1. Lekérdezzük a profiles táblából a nevet tartozó e-mail címet
+        const { data: profile, error: profileError } = await supabase
+          .from('profiles')
+          .select('email')
+          .eq('username', username.trim())
+          .single();
+
+        if (profileError || !profile?.email) {
+          setErrorMsg('Nem található ilyen felhasználónév az adatbázisban.');
+          setLoading(false);
+          return;
+        }
+
+        // 2. Belépés a profiles-ból kapott valódi e-mail címmel és a megadott jelszóval
         const { data, error } = await supabase.auth.signInWithPassword({
-          email: loginEmail,
+          email: profile.email,
           password,
         });
 
         if (error) {
-          setErrorMsg(`Belépési hiba: ${error.message || 'Hibás adatok'}`);
+          setErrorMsg(`Belépési hiba: ${error.message || 'Hibás jelszó'}`);
         } else if (data.session) {
           router.push('/');
           router.refresh();
@@ -93,7 +100,6 @@ export default function LoginPage() {
             />
           </div>
 
-          {/* Email mező CSAK regisztrációnál jelenik meg */}
           {isSignUp && (
             <div>
               <label className="block text-xs text-slate-400 mb-1">Email cím</label>

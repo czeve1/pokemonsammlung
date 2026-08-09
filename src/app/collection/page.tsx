@@ -60,6 +60,7 @@ function CollectionContent() {
   const [rarityOptions, setRarityOptions] = useState<string[]>([]);
   const [userId, setUserId] = useState<string | null>(null);
   const [isViewingOtherUser, setIsViewingOtherUser] = useState(false);
+  const [profileUsername, setProfileUsername] = useState<string | null>(null);
   
   // Kiválasztott kártya a modálhoz
   const [selectedCard, setSelectedCard] = useState<CardModalData | null>(null);
@@ -85,7 +86,20 @@ function CollectionContent() {
 
       setUserId(activeUserId);
 
-      // 2. Szett adatok lekérése (total_base_cards kell a secret vizsgálathoz!)
+      // Lekérdezzük a profil felhasználónevét, hogy a visszalépés a helyes /profile/[username]-re mutasson
+      if (activeUserId) {
+        const { data: profileData } = await supabase
+          .from('profiles')
+          .select('username')
+          .eq('id', activeUserId)
+          .maybeSingle();
+
+        if (profileData?.username) {
+          setProfileUsername(profileData.username);
+        }
+      }
+
+      // 2. Szett adatok lekérése
       let currentSetBaseCards = 0;
       if (setIdFilter) {
         const { data: setData } = await supabase
@@ -100,7 +114,7 @@ function CollectionContent() {
         }
       }
 
-      // 3. Ha NINCS kijelölve egy szett sem, kérjük le az összes szett total_base_cards mezőjét egy térképbe
+      // 3. Ha NINCS kijelölve szett
       const allSetsMap = new Map<string, number>();
       if (!setIdFilter) {
         const { data: allSets } = await supabase.from('sets').select('id, total_base_cards');
@@ -109,7 +123,7 @@ function CollectionContent() {
         }
       }
 
-      // 4. User darabszámok lekérése (akár saját, akár más user ID-jával)
+      // 4. User darabszámok lekérése
       const { data: colData } = await supabase
         .from('user_collections')
         .select('card_id, quantity_base, quantity_reverse')
@@ -141,7 +155,6 @@ function CollectionContent() {
         const qtyData = userColMap.get(c.id) || { base: 0, reverse: 0 };
         const num = parseInt(String(c.card_number || c.id).replace(/\D/g, ''), 10) || 0;
         
-        // Szett alap kártyáinak száma
         const setBase = setIdFilter ? currentSetBaseCards : (allSetsMap.get(String(c.set_id)) || 0);
         const isSecret = setBase > 0 && num > setBase;
 
@@ -171,7 +184,6 @@ function CollectionContent() {
         filtered = rawCards;
       }
 
-      // Ritkaság opciók a szűrőhöz
       const rarities = Array.from(new Set(filtered.map((c) => c.rarity).filter(Boolean))) as string[];
       setRarityOptions(rarities);
 
@@ -182,13 +194,11 @@ function CollectionContent() {
     fetchCollection();
   }, [setIdFilter, mode, targetUserIdFromUrl, router]);
 
-  // --- KÁRTYA GYŰJTEMÉNY / DARABSZÁM KEZELÉSE ---
   const handleToggleCard = async (
     cardId: string, 
     type: 'base' | 'reverse', 
     explicitQuantity?: number
   ) => {
-    // Ha más kollekcióját nézzük vendégként, nem módosíthatjuk
     if (isViewingOtherUser) {
       alert('Más felhasználó kollekcióját nem módosíthatod!');
       return;
@@ -217,7 +227,6 @@ function CollectionContent() {
     const nextBase = isBase ? nextQty : origBase;
     const nextReverse = !isBase ? nextQty : origReverse;
 
-    // 1. OPTIMISTA UI FRISSÍTÉS (Lista)
     setCards((prevCards) =>
       prevCards.map((c) => {
         if (String(c.id) === String(cardId)) {
@@ -231,7 +240,6 @@ function CollectionContent() {
       })
     );
 
-    // 2. OPTIMISTA UI FRISSÍTÉS (Nyitott Modál)
     if (selectedCard && String(selectedCard.id) === String(cardId)) {
       setSelectedCard((prev: any) => ({
         ...prev,
@@ -242,16 +250,13 @@ function CollectionContent() {
       }));
     }
 
-    // 3. SUPABASE ADATBÁZIS MENTÉS / TÖRLÉS
     try {
       if (nextBase === 0 && nextReverse === 0) {
-        const { error } = await supabase
+        await supabase
           .from('user_collections')
           .delete()
           .eq('user_id', userId)
           .eq('card_id', cardId);
-
-        if (error) console.error('❌ TÖRLÉSI HIBA:', error);
       } else {
         const { data: existingRecords } = await supabase
           .from('user_collections')
@@ -260,7 +265,7 @@ function CollectionContent() {
           .eq('card_id', cardId);
 
         if (existingRecords && existingRecords.length > 0) {
-          const { error } = await supabase
+          await supabase
             .from('user_collections')
             .update({
               quantity_base: nextBase,
@@ -269,10 +274,8 @@ function CollectionContent() {
             })
             .eq('user_id', userId)
             .eq('card_id', cardId);
-
-          if (error) console.error('❌ MÓDOSÍTÁSI HIBA:', error);
         } else {
-          const { error } = await supabase
+          await supabase
             .from('user_collections')
             .insert({
               user_id: userId,
@@ -281,8 +284,6 @@ function CollectionContent() {
               quantity_reverse: nextReverse,
               updated_at: new Date().toISOString(),
             });
-
-          if (error) console.error('❌ BEILLESZTÉSI HIBA:', error);
         }
       }
     } catch (err) {
@@ -290,7 +291,6 @@ function CollectionContent() {
     }
   };
 
-  // Szűrők alkalmazása
   const displayedCards = cards.filter((card) => {
     if (selectedRarity !== 'ALL' && card.rarity !== selectedRarity) {
       return false;
@@ -308,7 +308,12 @@ function CollectionContent() {
   });
 
   const ownedInView = displayedCards.filter((c) => (c.quantity_base + c.quantity_reverse) > 0).length;
+  
+  // Összes darabszám kiszámolása (minden megjelenített kártya base + reverse darabszáma összesítve)
+  const totalCardsCount = displayedCards.reduce((sum, c) => sum + c.quantity_base + c.quantity_reverse, 0);
+
   const setTitle = setInfo?.name_de || setInfo?.title || setInfo?.name || setIdFilter || 'Összes kártya';
+  const backProfileLink = profileUsername ? `/profile/${profileUsername}` : '/profile';
 
   if (loading) {
     return (
@@ -329,7 +334,7 @@ function CollectionContent() {
         <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 bg-slate-800 p-6 rounded-2xl border border-slate-700 shadow-xl">
           <div>
             <Link
-              href="/profile"
+              href={backProfileLink}
               className="text-xs text-amber-400 font-bold hover:underline mb-1 inline-block"
             >
               ➔ Vissza a profilhoz
@@ -346,13 +351,13 @@ function CollectionContent() {
           <div className="text-right bg-slate-900/80 px-4 py-3 rounded-xl border border-slate-700">
             <div className="text-2xl font-black text-amber-400">
               {mode === 'all_cards' || mode === 'secrets_only' ? (
-                <span>{ownedInView} / {displayedCards.length}</span>
+                <span>{ownedInView} / {displayedCards.length} <span className="text-sm font-normal text-slate-300">({totalCardsCount} db)</span></span>
               ) : (
-                <span>{displayedCards.length} db</span>
+                <span>{totalCardsCount} db</span>
               )}
             </div>
             <span className="text-slate-400 text-xs block">
-              {mode === 'all_cards' || mode === 'secrets_only' ? 'birtokolva / összesen' : 'birtokolt kártya'}
+              {mode === 'all_cards' || mode === 'secrets_only' ? 'birtokolva / összesen' : 'összes darabszám'}
             </span>
           </div>
         </div>
@@ -473,10 +478,15 @@ function CollectionContent() {
                   </div>
 
                   <div className="space-y-1">
+                    <div className="flex justify-between items-center text-xs text-slate-400">
+                      <span className="truncate" title={card.rarity || 'Normál'}>{card.rarity || 'Normál'}</span>
+                      {card.card_number && (
+                        <span className="font-mono text-amber-400/90 font-bold">#{card.card_number}</span>
+                      )}
+                    </div>
                     <h4 className="font-bold text-sm text-slate-200 truncate" title={cardName}>
                       {cardName}
                     </h4>
-                    <p className="text-xs text-slate-400 truncate">{card.rarity || 'Normál'}</p>
 
                     <div className="pt-2 flex gap-1 text-[11px] font-semibold">
                       <span className={`px-2 py-0.5 rounded flex-1 text-center ${card.quantity_base > 0 ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30' : 'bg-slate-900 text-slate-600'}`}>

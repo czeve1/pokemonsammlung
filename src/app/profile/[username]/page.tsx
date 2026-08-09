@@ -22,6 +22,8 @@ interface SetStat {
   setName: string;
   totalOwned: number;
   secretOwned: number;
+  uniqueOwnedBase: number;
+  totalSetBaseCards: number;
 }
 
 export default function UserProfilePage() {
@@ -46,13 +48,11 @@ export default function UserProfilePage() {
       setErrorMsg(null);
 
       try {
-        // 1. Megnézzük, hogy van-e bejelentkezett user (vendégként is folytatható hiba nélkül)
         const { data: sessionData } = await supabase.auth.getSession();
         if (sessionData?.session?.user) {
           setCurrentLoggedInUserId(sessionData.session.user.id);
         }
 
-        // 2. Lekérdjük a profil tulajdonosát a megadott username alapján
         const { data: profileData, error: profileError } = await supabase
           .from('profiles')
           .select('id, username, created_at')
@@ -67,7 +67,6 @@ export default function UserProfilePage() {
 
         setProfile(profileData);
 
-        // 3. Lekérdjük az adott felhasználó kollekcióját
         const { data: colData } = await supabase
           .from('user_collections')
           .select('card_id, quantity_base, quantity_reverse')
@@ -83,23 +82,26 @@ export default function UserProfilePage() {
           return;
         }
 
-        // 4. Szettek lekérése
+        // 4. Szettek lekérése (itt lekérjük a total_cards adatot is)
         const { data: setsData } = await supabase
           .from('sets')
           .select('*');
 
-        const setsMap = new Map<string, { name: string; totalBase: number }>();
+        const setsMap = new Map<string, { name: string; totalCards: number; totalBase: number }>();
         if (setsData) {
           setsData.forEach((s: any) => {
-            const totalBase = Number(s.total_base_cards ?? s.total_base ?? 0);
+            // Itt olvassuk ki a total_cards-ot a sets táblából a kért módon
+            const totalCards = Number(s.total_cards ?? s.total ?? 0);
+            const totalBase = Number(s.total_base_cards ?? s.total_base ?? totalCards);
+            
             setsMap.set(String(s.id), {
               name: s.name_de || s.name || s.title || String(s.id),
+              totalCards: totalCards,
               totalBase: totalBase,
             });
           });
         }
 
-        // 5. Kártyák lekérése kötegelve
         const cardIds = Array.from(new Set(ownedItems.map((item) => item.card_id).filter(Boolean)));
         const cardsMap = new Map<string, { id: string; set_id: string | null; card_number: number }>();
 
@@ -126,13 +128,15 @@ export default function UserProfilePage() {
           }
         }
 
-        // 6. Statisztikák összegzése
         let totalSum = 0;
         let secretSum = 0;
         const statsMap: Record<string, SetStat> = {};
 
         ownedItems.forEach((item) => {
-          const qty = (item.quantity_base || 0) + (item.quantity_reverse || 0);
+          const baseQty = item.quantity_base || 0;
+          const revQty = item.quantity_reverse || 0;
+          const qty = baseQty + revQty;
+          
           const card = cardsMap.get(String(item.card_id));
           if (!card) return;
 
@@ -140,6 +144,7 @@ export default function UserProfilePage() {
           const setObj = setsMap.get(setId);
           const setName = setObj ? setObj.name : 'Ismeretlen szett';
           const totalBase = setObj ? setObj.totalBase : 0;
+          const totalCards = setObj ? setObj.totalCards : 0;
 
           const isSecret = totalBase > 0 && card.card_number > totalBase;
 
@@ -147,11 +152,22 @@ export default function UserProfilePage() {
           if (isSecret) secretSum += qty;
 
           if (!statsMap[setId]) {
-            statsMap[setId] = { setId, setName, totalOwned: 0, secretOwned: 0 };
+            statsMap[setId] = { 
+              setId, 
+              setName, 
+              totalOwned: 0, 
+              secretOwned: 0,
+              uniqueOwnedBase: 0,
+              totalSetBaseCards: totalCards // Itt már a total_cards értéket kapja meg a szettek fülhöz
+            };
           }
 
           statsMap[setId].totalOwned += qty;
           if (isSecret) statsMap[setId].secretOwned += qty;
+
+          if (baseQty > 0) {
+            statsMap[setId].uniqueOwnedBase += 1;
+          }
         });
 
         setTotalCardsCount(totalSum);
@@ -270,7 +286,7 @@ export default function UserProfilePage() {
         {/* ACCORDION FÜLEK */}
         <div className="space-y-4">
 
-          {/* 1. SZETTEK FULL */}
+          {/* 1. SZETTEK FÜL */}
           <div className="bg-slate-800 rounded-2xl border border-slate-700 overflow-hidden shadow-lg">
             <button
               onClick={() => toggleTab('sets')}
@@ -292,8 +308,10 @@ export default function UserProfilePage() {
                       href={`/collection?set=${set.setId}&user=${profile.id}&mode=all_cards`}
                       className="bg-slate-900/60 hover:bg-amber-500/10 hover:border-amber-500/50 border border-slate-700 p-3 rounded-xl transition-all flex justify-between items-center text-sm font-semibold"
                     >
-                      <span className="truncate">{set.setName}</span>
-                      <span className="text-xs text-amber-400 font-bold shrink-0 ml-2">Teljes szett ➔</span>
+                      <span className="truncate pr-2">{set.setName}</span>
+                      <span className="text-xs text-amber-400 font-bold shrink-0 bg-amber-500/10 px-2 py-1 rounded-lg border border-amber-500/20">
+                        {set.uniqueOwnedBase} / {set.totalSetBaseCards}
+                      </span>
                     </Link>
                   ))}
                 </div>
