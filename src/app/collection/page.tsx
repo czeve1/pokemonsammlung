@@ -24,6 +24,7 @@ interface CardItem {
   quantity_base: number;
   quantity_reverse: number;
   is_secret: boolean;
+  trend_price?: number;
   types?: string[];
   hp?: string | number;
   evolveFrom?: string;
@@ -52,7 +53,7 @@ function CollectionContent() {
   const targetUserIdFromUrl = searchParams.get('user');
 
   const [selectedRarity, setSelectedRarity] = useState<string>('ALL');
-  const [selectedOwnership, setSelectedOwnership] = useState<string>('ALL'); // 'ALL' | 'OWNED' | 'MISSING'
+  const [selectedOwnership, setSelectedOwnership] = useState<string>('ALL');
 
   const [loading, setLoading] = useState(true);
   const [cards, setCards] = useState<CardItem[]>([]);
@@ -62,7 +63,6 @@ function CollectionContent() {
   const [isViewingOtherUser, setIsViewingOtherUser] = useState(false);
   const [profileUsername, setProfileUsername] = useState<string | null>(null);
   
-  // Kiválasztott kártya a modálhoz
   const [selectedCard, setSelectedCard] = useState<CardModalData | null>(null);
 
   useEffect(() => {
@@ -71,7 +71,6 @@ function CollectionContent() {
 
       let activeUserId: string | null = targetUserIdFromUrl;
 
-      // Ha nincs megadva user az URL-ben, akkor a bejelentkezett felhasználót nézzük
       if (!activeUserId) {
         const { data: { user }, error: authError } = await supabase.auth.getUser();
         if (authError || !user) {
@@ -86,7 +85,6 @@ function CollectionContent() {
 
       setUserId(activeUserId);
 
-      // Lekérdezzük a profil felhasználónevét, hogy a visszalépés a helyes /profile/[username]-re mutasson
       if (activeUserId) {
         const { data: profileData } = await supabase
           .from('profiles')
@@ -99,7 +97,6 @@ function CollectionContent() {
         }
       }
 
-      // 2. Szett adatok lekérése
       let currentSetBaseCards = 0;
       if (setIdFilter) {
         const { data: setData } = await supabase
@@ -114,7 +111,6 @@ function CollectionContent() {
         }
       }
 
-      // 3. Ha NINCS kijelölve szett
       const allSetsMap = new Map<string, number>();
       if (!setIdFilter) {
         const { data: allSets } = await supabase.from('sets').select('id, total_base_cards');
@@ -123,11 +119,29 @@ function CollectionContent() {
         }
       }
 
-      // 4. User darabszámok lekérése
-      const { data: colData } = await supabase
-        .from('user_collections')
-        .select('card_id, quantity_base, quantity_reverse')
-        .eq('user_id', activeUserId);
+      let colData: any[] = [];
+      let colFrom = 0;
+      const step = 1000;
+      let keepFetchingCols = true;
+
+      while (keepFetchingCols) {
+        const { data, error } = await supabase
+          .from('user_collections')
+          .select('card_id, quantity_base, quantity_reverse')
+          .eq('user_id', activeUserId)
+          .range(colFrom, colFrom + step - 1);
+
+        if (error || !data || data.length === 0) {
+          keepFetchingCols = false;
+        } else {
+          colData = colData.concat(data);
+          if (data.length < step) {
+            keepFetchingCols = false;
+          } else {
+            colFrom += step;
+          }
+        }
+      }
 
       const userColMap = new Map<string, { base: number; reverse: number }>();
       (colData || []).forEach((row) => {
@@ -137,18 +151,40 @@ function CollectionContent() {
         });
       });
 
-      // 5. Kártyák lekérése
-      let cardsQuery = supabase.from('cards').select('*');
+      let cardsData: any[] = [];
       if (setIdFilter) {
-        cardsQuery = cardsQuery.eq('set_id', setIdFilter);
-      }
+        const { data, error } = await supabase
+          .from('cards')
+          .select('*')
+          .eq('set_id', setIdFilter);
+        
+        if (error) {
+          console.error('Hiba a kártyák betöltésekor:', error.message);
+          setLoading(false);
+          return;
+        }
+        cardsData = data || [];
+      } else {
+        let cardFrom = 0;
+        let keepFetchingCards = true;
 
-      const { data: cardsData, error: cardsError } = await cardsQuery;
+        while (keepFetchingCards) {
+          const { data, error } = await supabase
+            .from('cards')
+            .select('*')
+            .range(cardFrom, cardFrom + step - 1);
 
-      if (cardsError) {
-        console.error('Hiba a kártyák betöltésekor:', cardsError.message);
-        setLoading(false);
-        return;
+          if (error || !data || data.length === 0) {
+            keepFetchingCards = false;
+          } else {
+            cardsData = cardsData.concat(data);
+            if (data.length < step) {
+              keepFetchingCards = false;
+            } else {
+              cardFrom += step;
+            }
+          }
+        }
       }
 
       let rawCards: CardItem[] = (cardsData || []).map((c: any) => {
@@ -163,17 +199,16 @@ function CollectionContent() {
           quantity_base: qtyData.base,
           quantity_reverse: qtyData.reverse,
           is_secret: isSecret,
+          trend_price: 0,
         };
       });
 
-      // Sorbarendezés
       rawCards.sort((a, b) => {
         const numA = parseInt(String(a.card_number || a.id).replace(/\D/g, ''), 10) || 0;
         const numB = parseInt(String(b.card_number || b.id).replace(/\D/g, ''), 10) || 0;
         return numA - numB;
       });
 
-      // Módszer szerinti szűrés
       let filtered: CardItem[] = [];
 
       if (mode === 'user_only') {
@@ -189,6 +224,39 @@ function CollectionContent() {
 
       setCards(filtered);
       setLoading(false);
+
+      // --- Árak lekérése a TCGdex API-ból a háttérben ---
+      const cardIds = filtered.map((c) => c.id).filter(Boolean);
+      const pricePromises = cardIds.map(async (id) => {
+        try {
+          const res = await fetch(`https://api.tcgdex.net/v2/en/cards/${id}`);
+          if (res.ok) {
+            const data = await res.json();
+            const trendPrice = data?.pricing?.cardmarket?.trend;
+            if (trendPrice) {
+              return { id, price: trendPrice };
+            }
+          }
+        } catch (e) {
+          // Hiba esetén kihagyjuk
+        }
+        return null;
+      });
+
+      const results = await Promise.all(pricePromises);
+      const newPrices: Record<string, number> = {};
+      results.forEach((item) => {
+        if (item) {
+          newPrices[item.id] = item.price;
+        }
+      });
+
+      setCards((prevCards) =>
+        prevCards.map((card) => ({
+          ...card,
+          trend_price: newPrices[card.id] || card.trend_price || 0,
+        }))
+      );
     }
 
     fetchCollection();
@@ -308,9 +376,16 @@ function CollectionContent() {
   });
 
   const ownedInView = displayedCards.filter((c) => (c.quantity_base + c.quantity_reverse) > 0).length;
-  
-  // Összes darabszám kiszámolása (minden megjelenített kártya base + reverse darabszáma összesítve)
   const totalCardsCount = displayedCards.reduce((sum, c) => sum + c.quantity_base + c.quantity_reverse, 0);
+
+  // Összérték kiszámítása az elvárásaid szerint:
+  // - user_only / all_cards esetén: minden szűrt kártyánál (base + reverse) * ár összeadva
+  // - secrets_only esetén: csak a secret kártyák (base + reverse) * ár összeadva (duplikáltak is benne vannak a darabszám miatt)
+  const totalMarketPrice = displayedCards.reduce((sum, c) => {
+    if (mode === 'secrets_only' && !c.is_secret) return sum;
+    const qty = c.quantity_base + c.quantity_reverse;
+    return sum + (qty * (c.trend_price || 0));
+  }, 0);
 
   const setTitle = setInfo?.name_de || setInfo?.title || setInfo?.name || setIdFilter || 'Összes kártya';
   const backProfileLink = profileUsername ? `/profile/${profileUsername}` : '/profile';
@@ -330,7 +405,6 @@ function CollectionContent() {
     <main className="min-h-screen bg-slate-900 text-slate-100 p-4 sm:p-8">
       <div className="max-w-6xl mx-auto space-y-6">
 
-        {/* FEJLÉC */}
         <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 bg-slate-800 p-6 rounded-2xl border border-slate-700 shadow-xl">
           <div>
             <Link
@@ -348,21 +422,31 @@ function CollectionContent() {
             </p>
           </div>
 
-          <div className="text-right bg-slate-900/80 px-4 py-3 rounded-xl border border-slate-700">
-            <div className="text-2xl font-black text-amber-400">
-              {mode === 'all_cards' || mode === 'secrets_only' ? (
-                <span>{ownedInView} / {displayedCards.length} <span className="text-sm font-normal text-slate-300">({totalCardsCount} db)</span></span>
-              ) : (
-                <span>{totalCardsCount} db</span>
-              )}
+          <div className="flex items-center gap-4">
+            <div className="text-right bg-slate-900/80 px-4 py-3 rounded-xl border border-slate-700">
+              <div className="text-2xl font-black text-emerald-400">
+                {totalMarketPrice.toFixed(2)} €
+              </div>
+              <span className="text-slate-400 text-xs block">
+                {mode === 'secrets_only' ? 'Secret összérték' : 'Cardmarket érték'}
+              </span>
             </div>
-            <span className="text-slate-400 text-xs block">
-              {mode === 'all_cards' || mode === 'secrets_only' ? 'birtokolva / összesen' : 'összes darabszám'}
-            </span>
+
+            <div className="text-right bg-slate-900/80 px-4 py-3 rounded-xl border border-slate-700">
+              <div className="text-2xl font-black text-amber-400">
+                {mode === 'all_cards' || mode === 'secrets_only' ? (
+                  <span>{ownedInView} / {displayedCards.length} <span className="text-sm font-normal text-slate-300">({totalCardsCount} db)</span></span>
+                ) : (
+                  <span>{totalCardsCount} db</span>
+                )}
+              </div>
+              <span className="text-slate-400 text-xs block">
+                {mode === 'all_cards' || mode === 'secrets_only' ? 'birtokolva / összesen' : 'összes darabszám'}
+              </span>
+            </div>
           </div>
         </div>
 
-        {/* SZŰRŐK */}
         <div className="bg-slate-800/80 p-4 rounded-xl border border-slate-700/80 flex flex-wrap gap-4 items-center justify-between">
           <div className="flex flex-wrap gap-4 items-center">
             {rarityOptions.length > 0 && (
@@ -410,7 +494,6 @@ function CollectionContent() {
           )}
         </div>
 
-        {/* KÁRTYA RÁCS */}
         {displayedCards.length === 0 ? (
           <div className="bg-slate-800 p-12 rounded-2xl border border-slate-700 text-center space-y-3">
             <p className="text-4xl">🎴</p>
@@ -423,6 +506,13 @@ function CollectionContent() {
               const totalQty = card.quantity_base + card.quantity_reverse;
               const cardName = card.name_de || card.name || card.title || 'Névtelen kártya';
               const imageUrl = card.image_de_url || card.image_url;
+              
+              // Kiszámítjuk az árat a mód alapján:
+              // - user_only esetén: (base + reverse) * trend_price
+              // - all_cards / secrets_only esetén: csak a darabár (trend_price)
+              const displayCardPrice = mode === 'user_only' 
+                ? totalQty * (card.trend_price || 0) 
+                : (card.trend_price || 0);
 
               const modalData: CardModalData = {
                 id: String(card.id),
@@ -484,9 +574,15 @@ function CollectionContent() {
                         <span className="font-mono text-amber-400/90 font-bold">#{card.card_number}</span>
                       )}
                     </div>
-                    <h4 className="font-bold text-sm text-slate-200 truncate" title={cardName}>
-                      {cardName}
-                    </h4>
+                    
+                    <div className="flex justify-between items-start gap-1">
+                      <h4 className="font-bold text-sm text-slate-200 truncate flex-1" title={cardName}>
+                        {cardName}
+                      </h4>
+                      <span className="text-xs font-semibold text-emerald-400 whitespace-nowrap" title={`Darabonként: ${card.trend_price || 0} €`}>
+                        {displayCardPrice > 0 ? `${displayCardPrice.toFixed(2)} €` : '-'}
+                      </span>
+                    </div>
 
                     <div className="pt-2 flex gap-1 text-[11px] font-semibold">
                       <span className={`px-2 py-0.5 rounded flex-1 text-center ${card.quantity_base > 0 ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30' : 'bg-slate-900 text-slate-600'}`}>

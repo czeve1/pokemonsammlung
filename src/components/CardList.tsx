@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { CardModalData } from './CardModal';
 
 export interface Card extends CardModalData {
@@ -53,7 +53,7 @@ export interface SetDetails {
 }
 
 export interface CardListProps {
-  setDetails?: SetDetails; // <-- Itt lett opcionálissá téve (?)
+  setDetails?: SetDetails;
   initialCards?: Card[];
   cards?: Card[];
   onToggleCard?: (cardId: string, type: 'base' | 'reverse') => void;
@@ -70,6 +70,44 @@ export default function CardList({
   const [isStatsOpen, setIsStatsOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [filter, setFilter] = useState<'all' | 'collected' | 'missing'>('all');
+  
+  // --- ÚJ STATE: Árak tárolásához ---
+  const [prices, setPrices] = useState<Record<string, number>>({});
+
+  // --- ÚJ EFFECT: Árak lekérése a TCGdex API-ból párhuzamosan ---
+  useEffect(() => {
+    async function fetchCardPrices() {
+      if (!cards || cards.length === 0) return;
+
+      const cardIds = cards.map((c) => c.id).filter(Boolean);
+      const pricePromises = cardIds.map(async (id) => {
+        try {
+          const res = await fetch(`https://api.tcgdex.net/v2/en/cards/${id}`);
+          if (res.ok) {
+            const data = await res.json();
+            const trendPrice = data?.pricing?.cardmarket?.trend;
+            if (trendPrice) {
+              return { id, price: trendPrice };
+            }
+          }
+        } catch (e) {
+          // Hiba esetén kihagyjuk
+        }
+        return null;
+      });
+
+      const results = await Promise.all(pricePromises);
+      const newPrices: Record<string, number> = {};
+      results.forEach((item) => {
+        if (item) {
+          newPrices[item.id] = item.price;
+        }
+      });
+      setPrices(newPrices);
+    }
+
+    fetchCardPrices();
+  }, [cards]);
 
   const rawReleaseDate = 
     setDetails?.release_date || 
@@ -361,6 +399,8 @@ export default function CardList({
               card.has_reverse_holo === true &&
               (!hasPromoCards || isPromoCard);
 
+            const cardPrice = prices[card.id];
+
             return (
               <div
                 key={card.id}
@@ -377,7 +417,7 @@ export default function CardList({
                   </span>
                 </div>
 
-                {/* KÁRTYA KÉPE (RÁKATTINTVA MEGNYÍLIK A MODÁL) */}
+                {/* KÁRTYA KÉPE */}
                 <div 
                   onClick={() => onCardClick && onCardClick(card)}
                   className="relative aspect-[2.5/3.5] w-full bg-slate-950 rounded-xl overflow-hidden border border-slate-800/80 flex flex-col items-center justify-center p-2 text-center group cursor-pointer hover:border-amber-500/50 transition-all"
@@ -406,6 +446,14 @@ export default function CardList({
                   title={cardName}
                 >
                   {cardName}
+                </div>
+
+                {/* ÁR MEGJELENÍTÉSE */}
+                <div className="flex items-center justify-between text-[11px] pt-0.5 border-t border-slate-800/60">
+                  <span className="text-slate-500 text-[10px]">Trend Ár:</span>
+                  <span className="font-mono font-bold text-amber-400">
+                    {cardPrice ? `${cardPrice.toFixed(2)} €` : '-'}
+                  </span>
                 </div>
 
                 <div className="grid grid-cols-2 gap-1.5 pt-1">
